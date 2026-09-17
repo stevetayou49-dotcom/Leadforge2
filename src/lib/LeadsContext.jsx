@@ -1,6 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-
-const STORAGE_KEY = 'leadforge-leads';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 const seedLeads = [
   { id: 'demo-1', name: 'Bella Italia', category: 'Restaurant', district: 'Kreuzberg', address: 'Oranienstraße 45, 10999 Berlin', phone: '030 12345678', email: 'info@bella-italia-berlin.de', website: 'Keine Website', websiteUrl: '', score: 92, status: 'Neu', reason: 'Keine eigene Website gefunden', priceMin: 650, priceMax: 950, offer: 'Neue, moderne Website' },
@@ -9,24 +7,42 @@ const seedLeads = [
   { id: 'demo-4', name: 'Pizza Berlin', category: 'Restaurant', district: 'Friedrichshain', address: 'Warschauer Straße 25, 10243 Berlin', phone: '030 45678901', email: '', website: 'Veraltet', websiteUrl: '', score: 84, status: 'Interessiert', reason: 'Website könnte moderner und mobilfreundlicher sein', priceMin: 450, priceMax: 750, offer: 'Website-Modernisierung' },
 ];
 
-function loadLeads() {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY);
-    return stored ? JSON.parse(stored) : seedLeads;
-  } catch {
-    return seedLeads;
-  }
-}
+// Alle Leads liegen jetzt in der gemeinsamen Datenbank auf dem Server statt im
+// localStorage des Browsers — so sehen alle Nutzer dieselben Leads.
+const API_BASE = '/api/saved-leads';
+const POLL_INTERVAL_MS = 4000; // regelmäßig neu laden, damit Änderungen anderer sichtbar werden
 
 const LeadsContext = createContext(null);
 
 export function LeadsProvider({ children }) {
-  const [leads, setLeads] = useState(loadLeads);
+  const [leads, setLeads] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState('');
+  const skipNextPoll = useRef(false);
+
+  async function fetchLeads({ silent = false } = {}) {
+    try {
+      const res = await fetch(API_BASE);
+      const data = await res.json();
+      if (data.success) setLeads(data.leads);
+    } catch {
+      if (!silent) setNotice('Verbindung zum Server fehlgeschlagen');
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(leads));
-  }, [leads]);
+    fetchLeads();
+    const timer = setInterval(() => {
+      if (skipNextPoll.current) {
+        skipNextPoll.current = false;
+        return;
+      }
+      fetchLeads({ silent: true });
+    }, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!notice) return undefined;
@@ -34,55 +50,71 @@ export function LeadsProvider({ children }) {
     return () => clearTimeout(timer);
   }, [notice]);
 
-  function addLead(lead) {
+  async function addLead(lead) {
     const normalized = { ...lead, id: lead.id || `lead-${Date.now()}` };
-    let added = false;
-    setLeads((current) => {
-      if (current.some((item) => item.id === normalized.id)) return current;
-      added = true;
-      return [normalized, ...current];
+    const res = await fetch(API_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lead: normalized }),
     });
-    setNotice(added ? 'Lead gespeichert' : 'Lead ist bereits gespeichert');
-    return normalized;
+    const data = await res.json();
+    if (data.success) {
+      skipNextPoll.current = true;
+      setLeads((current) => (current.some((l) => l.id === data.lead.id) ? current : [data.lead, ...current]));
+      setNotice(data.added ? 'Lead gespeichert' : 'Lead ist bereits gespeichert');
+    }
+    return data.lead || normalized;
   }
 
-  function addLeads(newLeads) {
-    setLeads((current) => {
-      const map = new Map(current.map((lead) => [lead.id, lead]));
-      let addedCount = 0;
-      newLeads.forEach((lead) => {
-        if (!map.has(lead.id)) {
-          map.set(lead.id, lead);
-          addedCount += 1;
-        }
-      });
-      setNotice(addedCount ? `${addedCount} neue Leads gespeichert` : 'Keine neuen Leads (bereits vorhanden)');
-      return [...map.values()];
+  async function addLeads(newLeads) {
+    const res = await fetch(API_BASE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leads: newLeads }),
     });
+    const data = await res.json();
+    setNotice(data.addedCount ? `${data.addedCount} neue Leads gespeichert` : 'Keine neuen Leads (bereits vorhanden)');
+    await fetchLeads({ silent: true });
   }
 
-  function updateLead(id, patch) {
+  async function updateLead(id, patch) {
+    skipNextPoll.current = true;
     setLeads((current) => current.map((lead) => (lead.id === id ? { ...lead, ...patch } : lead)));
+    await fetch(`${API_BASE}/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    });
   }
 
-  function updateStatus(id, nextStatus) {
-    updateLead(id, { status: nextStatus });
+  async function updateStatus(id, nextStatus) {
+    await updateLead(id, { status: nextStatus });
     setNotice(`Status auf „${nextStatus}“ gesetzt`);
   }
 
-  function deleteLead(id) {
+  async function deleteLead(id) {
+    skipNextPoll.current = true;
     setLeads((current) => current.filter((lead) => lead.id !== id));
+    await fetch(`${API_BASE}/${id}`, { method: 'DELETE' });
     setNotice('Lead entfernt');
   }
 
-  function resetLeads() {
+  async function resetLeads() {
+    skipNextPoll.current = true;
     setLeads(seedLeads);
-    setNotice('Demo-Daten wiederhergestellt');
+    await fetch(`${API_BASE}/replace-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ leads: seedLeads }),
+    });
+    setNotice('Demo-Daten wiederhergestellt (für alle)');
   }
 
-  function clearLeads() {
+  async function clearLeads() {
+    skipNextPoll.current = true;
     setLeads([]);
-    setNotice('Alle Leads gelöscht');
+    await fetch(API_BASE, { method: 'DELETE' });
+    setNotice('Alle Leads gelöscht (für alle)');
   }
 
   const stats = useMemo(() => ({
@@ -96,7 +128,7 @@ export function LeadsProvider({ children }) {
   }), [leads]);
 
   const value = {
-    leads, stats, notice, setNotice,
+    leads, stats, notice, setNotice, loading,
     addLead, addLeads, updateLead, updateStatus, deleteLead, resetLeads, clearLeads,
   };
 
