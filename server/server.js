@@ -160,4 +160,73 @@ app.post('/api/anfragen', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Name und E-Mail sind erforderlich.' });
     }
     const entry = await addAnfrage({ name, email, paket, nachricht });
-    notifyNewAnfrage(entry); // läuft im Hintergrund,
+    notifyNewAnfrage(entry); // läuft im Hintergrund, blockiert die Antwort nicht
+    res.json({ success: true, id: entry.id });
+  } catch (error) {
+    console.error('Anfrage-Fehler:', error);
+    res.status(500).json({ success: false, message: 'Fehler beim Speichern der Anfrage.' });
+  }
+});
+
+// geschützt: nur mit korrektem x-admin-key
+app.get('/api/anfragen', requireAdmin, async (_req, res) => {
+  const list = await readAll();
+  res.json({ success: true, anfragen: list });
+});
+
+app.patch('/api/anfragen/:id', requireAdmin, async (req, res) => {
+  const { status } = req.body || {};
+  if (!status) return res.status(400).json({ success: false, message: 'Status fehlt.' });
+  const updated = await updateStatus(req.params.id, status);
+  if (!updated) return res.status(404).json({ success: false, message: 'Anfrage nicht gefunden.' });
+  res.json({ success: true, anfrage: updated });
+});
+
+app.delete('/api/anfragen/:id', requireAdmin, async (req, res) => {
+  const ok = await removeAnfrage(req.params.id);
+  if (!ok) return res.status(404).json({ success: false, message: 'Anfrage nicht gefunden.' });
+  res.json({ success: true });
+});
+
+// --- Demo-Links (Vorschau einer Website-Vorlage zum Verschicken an Kunden) ---
+
+// geschützt: nur du kannst Demos anlegen/verwalten
+app.post('/api/demos', requireAdmin, async (req, res) => {
+  try {
+    const { businessName, pages, css } = req.body || {};
+    const { slug } = await createDemo({ businessName, pages, css });
+    res.json({ success: true, slug, path: `/demo/${slug}/` });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message || 'Demo konnte nicht erstellt werden.' });
+  }
+});
+
+app.get('/api/demos', requireAdmin, async (_req, res) => {
+  res.json({ success: true, demos: await listDemos() });
+});
+
+app.delete('/api/demos/:slug', requireAdmin, async (req, res) => {
+  const ok = await deleteDemo(req.params.slug);
+  if (!ok) return res.status(404).json({ success: false, message: 'Demo nicht gefunden.' });
+  res.json({ success: true });
+});
+
+// öffentlich: Kunden brauchen keinen Admin-Key, um sich die Demo anzusehen
+app.get('/demo/:slug', (req, res) => serveDemoFile(req, res, 'index.html'));
+app.get('/demo/:slug/:file', (req, res) => serveDemoFile(req, res, req.params.file));
+
+function serveDemoFile(req, res, file) {
+  const filePath = demoFilePath(req.params.slug, file);
+  res.sendFile(filePath, (err) => { if (err) res.status(404).send('Demo nicht gefunden — der Link ist eventuell abgelaufen oder wurde gelöscht.'); });
+}
+
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) return next();
+  return express.static(path.join(__dirname, '../dist'))(req, res, next);
+});
+app.get(/^(?!\/api\/).*/, (req, res, next) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'), (err) => { if (err) next(); });
+});
+
+app.use((req, res) => res.status(404).json({ success: false, message: `Route nicht gefunden: ${req.method} ${req.path}` }));
+app.listen(PORT, () => console.log(`LeadForge Server läuft auf http://localhost:${PORT}`));
